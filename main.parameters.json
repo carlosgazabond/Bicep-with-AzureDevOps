@@ -1,0 +1,82 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "East US 2"
+    },
+    "env": {
+      "value": ""
+    },
+    "cliente": {
+      "value": ""
+    },
+    "storageAccesTier": {
+      "value": "Hot"
+    },
+    "StorageSku": {
+      "value": "Standard_LRS"
+    },
+    "skuApiManagement": {
+      "value": ""
+    },
+    "skucountApiManag": {
+      "value": 0
+    },
+    "publisherEmail": {
+      "value": ""
+    },
+    "publisherName": {
+      "value": ""
+    },
+    "rgName": {
+      "value": ""
+    },
+    "appServiceWindowsVersion": {
+      "value": ""
+    },
+    "appServiceSku": {
+      "value": "B1"
+    },
+    "appServiceOS": {
+      "value": ""
+    },
+    "appServiceLinuxVersion": {
+      "value": ""
+    },
+    "databaseSKU": {
+      "value": "Standard"
+    },
+    "sqlTier": {
+      "value": "Standard"
+    },
+    "webAppNameSettings": {
+      "value": ""
+    },
+    "existingRG": {
+      "value": ""
+    },
+    "webValidatingSettings": {
+      "value": ""
+    },
+    "webJobsSettings": {
+      "value": ""
+    },
+    "webFunctionAppNameSettings": {
+      "value": ""
+    },
+    "admidPasswordDB": {
+      "value": ""
+    },
+    "admidUsernameDB": {
+      "value": ""
+    },
+    "RgdelServidorBD": {
+      "value": ""
+    },
+    "sqlServerNameExisting": {
+      "value": ""
+    }
+    
+  }
+}

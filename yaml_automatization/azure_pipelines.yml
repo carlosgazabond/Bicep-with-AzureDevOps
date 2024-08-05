@@ -1,0 +1,696 @@
+trigger: none
+
+variables:
+  vmImageName: 'ubuntu-latest'
+  location: 'East US 2'
+  templateFile: 'bicepIaC/singleTenant/main.bicep'
+  csmParametersFile: 'bicepIaC/singleTenant/main.parameters.json'
+  ## Suscripciones 
+  azureSubscription: ''
+  subscriptionId_NMP: ''
+  azureSubscriptionQA: 'Environment_QA'
+  azureSubscriptionBETA: 'Environment_BETA'
+  azureSubscriptionPRO: ''
+  ## SQL Server
+  sqlServerName: 'sqlserver-$(cliente)-$(env)'
+  sqlAdminUsername: '$(adminUsername)'            #usuario admin sql server
+  sqlAdminPassword: '$(adminPassDB)'              #Pass admin sql server
+  # setting a modificar
+  NotificationMasterKey: 'Notification.MasterKey'
+  FunctionAppMasterKey: 'FunctionApp.MasterKey'  
+  NotificationSqlServer: 'Notification.SqlServer'
+  plcolab2qadatabase: 'plcolab.2qa.database'
+  clienteeRepExtDatabase: '$(cliente).eRepExt.Database'
+  clienteRepExtStorage: '$(cliente).RepExt.Storage'
+
+name: $(date:yyyyMMdd)$(rev:.r)
+
+jobs:
+
+#################################################################
+########### Creación de compoenntes de single tenant ############
+#################################################################
+
+- job: Job_1
+  displayName: 'Aprovisionamiento de Infraestructura Single Tenant'
+  
+  pool:
+    vmImage: $(vmImageName)
+
+## Creacion de componentes en Azure
+  steps:
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Create Or Update Resource'
+    inputs:
+      deploymentScope: 'Resource Group'
+      azureResourceManagerConnection: 'Suscripción Mariano (58180bd3-a040-4a1a-84e5-b5586d69c0fb)'
+      subscriptionId: '$(subscriptionId_NMP)'
+      action: 'Create Or Update Resource Group'
+      resourceGroupName: '$(resourceGroupName)'
+      location: '$(location)'
+      templateLocation: 'Linked artifact'
+      csmFile: '$(templateFile)'
+      csmParametersFile: '$(csmParametersFile)'
+      overrideParameters: >
+        -env $(env)
+        -cliente $(cliente)
+        -storageAccesTier $(storageAccesTier)
+        -StorageSku $(StorageSku)
+        -skuApiManagement $(skuApiManagement)
+        -skucountApiManag $(skucountApiManag)
+        -publisherEmail $(publisherEmail)
+        -publisherName $(publisherName)
+        -rgName $(resourceGroupName)
+        -appServiceWindowsVersion $(appServiceWindowsVersion)
+        -appServiceSku $(appServiceSku)
+        -appServiceOS $(appServiceOS)
+        -appServiceLinuxVersion $(appServiceLinuxVersion)
+        -databaseSKU $(databaseSKU)
+        -sqlTier $(sqlTier)
+        -admidPasswordDB $(adminPassDB)
+        -webAppNameSettings $(webApiNameSettings)
+        -webJobsSettings $(webjobsNameSettings)
+        -webValidatingSettings $(webvalidatingNameSettings)
+        -webFunctionAppNameSettings $(functionAppNameSettings)
+        -existingRG $(RG_settings_AppService)
+        -admidUsernameDB $(adminUsername)
+        -RgdelServidorBD $(rgdelServidorExistente)
+        -sqlServerNameExisting $(sqlServerNameExisting)
+      deploymentMode: 'Incremental'
+      deploymentName: 'DeployPipelineTemplate'
+
+#################################################################
+########### configuraciones a nivel de base de datos ############
+#################################################################
+
+- job: Job_2
+  displayName: 'Configuraciones SQLServer y DB'
+  
+  pool:
+    vmImage: $(vmImageName)
+
+  steps:
+  - task: Bash@3
+    condition: and(succeeded(), eq(1, 0))
+    displayName: 'Esperando creación de SQL Server y DB'
+    inputs:
+      targetType: 'inline'
+      script: 'sleep 20'
+  
+  - task: AzureCLI@2
+    displayName: Config DB to Allow Networking
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        if [ -z "$(sqlServerNameExisting)" ]; then
+          az sql server firewall-rule create --resource-group $(resourceGroupName) --server $(sqlServerName) -n AllowAllWindowsAzureIps --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+          
+          az sql server firewall-rule create --resource-group $(resourceGroupName) --server $(sqlServerName) --name Estela_Colombia --start-ip-address 190.131.221.130 --end-ip-address 190.131.221.130
+
+          az sql server firewall-rule create --resource-group $(resourceGroupName) --server $(sqlServerName) --name Estela_Mexico --start-ip-address 201.149.12.221 --end-ip-address 201.149.12.221
+        fi
+
+  - task: AzureCLI@2
+    displayName: 'Creating database user'
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        
+        # Variables
+        #DB repext
+        sqlDBNameRepext="$(cliente)-repext-$(env)"
+        #DB notificador
+        sqlDBNamenNotification="plcolab-notification-$(cliente)-$(env)"
+        
+        sudo apt-get update
+        sudo apt-get install -y mssql-tools unixodbc-dev
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        source ~/.bashrc
+
+        # Determine the SQL Server name based on neworExistingServer variable
+        if [ -z "$(sqlServerNameExisting)" ]; then
+          targetSqlServerName="$(sqlServerName)"
+        else
+          targetSqlServerName="$(sqlServerNameExisting)"
+        fi
+
+        # Create SQL script for master DB repext
+        echo "CREATE LOGIN [$(newSqlUsernameRepext)] WITH PASSWORD = N'$(newSqlPasswordRepext)';" > create_login_repext.sql
+        
+        # Create SQL script for master DB Notification
+        echo "CREATE LOGIN [$(newSqlUsernameNotification)] WITH PASSWORD = N'$(newSqlPassNotication)';" > create_login_noti.sql
+        
+        # Execute SQL script on master DB repext
+        sqlcmd -S "$targetSqlServerName.database.windows.net" -d "master" -U "$(sqlAdminUsername)" -P "$(sqlAdminPassword)" -i create_login_repext.sql
+        
+        # Execute SQL script on master DB Notification
+        sqlcmd -S "$targetSqlServerName.database.windows.net" -d "master" -U "$(sqlAdminUsername)" -P "$(sqlAdminPassword)" -i create_login_noti.sql
+        
+        # Create SQL script for DB Repext
+        echo "CREATE USER [$(newSqlUsernameRepext)] FOR LOGIN [$(newSqlUsernameRepext)];
+        ALTER ROLE db_owner ADD MEMBER [$(newSqlUsernameRepext)];" > create_user_repext.sql
+        
+        # Create SQL script for DB Notification
+        echo "CREATE USER [$(newSqlUsernameNotification)] FOR LOGIN [$(newSqlUsernameNotification)];
+        ALTER ROLE db_owner ADD MEMBER [$(newSqlUsernameNotification)];" > create_user_noti.sql
+        
+        # Execute SQL script on DB Repext
+        sqlcmd -S "$targetSqlServerName.database.windows.net" -d "$sqlDBNameRepext" -U "$(sqlAdminUsername)" -P "$(sqlAdminPassword)" -i create_user_repext.sql
+        
+        # Execute SQL script on DB Notification
+        sqlcmd -S "$targetSqlServerName.database.windows.net" -d "$sqlDBNamenNotification" -U "$(sqlAdminUsername)" -P "$(sqlAdminPassword)" -i create_user_noti.sql
+
+  - task: AzureCLI@2
+    displayName: 'Extract database schema'
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+
+        wget https://aka.ms/sqlpackage-linux -O sqlpackage.zip
+        unzip -o sqlpackage.zip -d sqlpackage
+        chmod +x sqlpackage/sqlpackage
+        
+        ./sqlpackage/sqlpackage /Action:Extract \
+        /SourceServerName:$(SQL_SERVER_NAME_SOURCE) \
+        /SourceDatabaseName:$(SQL_DATABASE_SOURCE) \
+        /SourceUser:$(SQL_USER_SOURCE) \
+        /SourcePassword:$(SQL_PASSWORD_SOURCE) \
+        /TargetFile:database.dacpac \
+        /p:IgnorePermissions=True \
+        /p:ExtractAllTableData=False \
+
+  - task: AzureCLI@2
+    displayName: 'publish database schema'
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+      
+        wget https://aka.ms/sqlpackage-linux -O sqlpackage.zip
+        unzip -o sqlpackage.zip -d sqlpackage
+        chmod +x sqlpackage/sqlpackage
+
+        # Determine the SQL Server name based on neworExistingServer variable
+        if [ -z "$(sqlServerNameExisting)" ]; then
+          targetSqlServerName="$(sqlServerName)"
+        else
+          targetSqlServerName="$(sqlServerNameExisting)"
+        fi
+
+        fulltargetSqlServerName="${targetSqlServerName}.database.windows.net"
+        targetDBname="${}-"
+    
+        ./sqlpackage/sqlpackage /Action:Publish \
+        /TargetServerName:$fulltargetSqlServerName \
+        /TargetDatabaseName:$(cliente)-repext-$(env) \
+        /TargetUser:$(newSqlUsernameRepext) \
+        /TargetPassword:$(newSqlPasswordRepext) \
+        /SourceFile:database.dacpac \
+        /p:AllowIncompatiblePlatform=False \
+        /p:AllowTableRecreation=False \
+        /p:BlockOnPossibleDataLoss=True \
+        /p:BlockWhenDriftDetected=True \
+        /p:DeployDatabaseInSingleUserMode=True \
+        /p:DisableAndReenableDdlTriggers=True \
+        /p:DisableIndexesForDataPhase=True \
+        /p:IgnoreAnsiNulls=True \
+        /p:IgnoreFullTextCatalogFilePath=True \
+        /p:IgnoreKeywordCasing=True \
+        /p:IgnoreRouteLifetime=True \
+        /p:IgnoreWhitespace=True \
+        /p:IncludeTransactionalScripts=True \
+        /p:LongRunningCommandTimeout=0 \
+        /p:NoAlterStatementsToChangeClrTypes=True \
+        /p:ScriptDatabaseCollation=False \
+        /p:ScriptDatabaseOptions=True \
+        /p:ScriptDeployStateChecks=False \
+        /p:ScriptFileSize=False \
+        /p:ScriptNewConstraintValidation=True \
+        /p:ScriptRefreshModule=True \
+        /p:TreatVerificationErrorsAsWarnings=False \
+        /p:VerifyCollationCompatibility=False \
+        /p:VerifyDeployment=True
+  
+  - task: AzureCLI@2
+    displayName: 'Cleanup users and roles'
+    inputs:
+      azureSubscription: '$(azureSubscription)' # Reemplaza con tu suscripción de Azure
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        $cleanupScript = @"
+        USE [azure-repext-pro];
+
+        DECLARE @username NVARCHAR(128);
+        DECLARE @schemaName NVARCHAR(128);
+        DECLARE user_cursor CURSOR FOR
+        SELECT name
+        FROM sys.database_principals
+        WHERE type_desc = 'SQL_USER' AND name NOT IN ('dbo', 'guest', 'INFORMATION_SCHEMA', 'sys');
+
+        OPEN user_cursor;
+        FETCH NEXT FROM user_cursor INTO @username;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            -- Cambiar el propietario del esquema
+            DECLARE schema_cursor CURSOR FOR
+            SELECT s.name
+            FROM sys.schemas s
+            INNER JOIN sys.database_principals dp ON s.principal_id = dp.principal_id
+            WHERE dp.name = @username;
+
+            OPEN schema_cursor;
+            FETCH NEXT FROM schema_cursor INTO @schemaName;
+
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                DECLARE @sql NVARCHAR(MAX) = 'ALTER AUTHORIZATION ON SCHEMA::[' + @schemaName + '] TO [dbo];';
+                EXEC sp_executesql @sql;
+                FETCH NEXT FROM schema_cursor INTO @schemaName;
+            END
+
+            CLOSE schema_cursor;
+            DEALLOCATE schema_cursor;
+
+            -- Eliminar al usuario de db_executor y luego eliminar al usuario
+            EXEC sp_droprolemember 'db_executor', @username;
+            EXEC ('DROP USER [' + @username + ']');
+
+            FETCH NEXT FROM user_cursor INTO @username;
+        END
+
+        CLOSE user_cursor;
+        DEALLOCATE user_cursor;
+        "@
+  
+        sqlcmd -S $(sqlServerName).database.windows.net -d $(cliente)-repext-$(env) -U $(newSqlUsernameRepext) -P $(newSqlPasswordRepext) -Q "$cleanupScript"
+
+####################################################################
+########### Insertando CnnString y AppSetting generales ############
+####################################################################
+
+- job: Job_3
+  dependsOn: job_1
+  displayName: 'CnnString and AppSetting'
+  
+  pool:
+    vmImage: $(vmImageName)
+
+  steps:
+  - task: AzureCLI@2
+    displayName: Set config and cnnstring
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+      
+        ACCOUNT_NAME_REPEXT=$(az storage account show --resource-group $(resourceGroupName) --name $(cliente)repext$(env) --query name --output tsv)
+        ACCOUNT_KEY_REPEXT=$(az storage account keys list --resource-group $(resourceGroupName) --account-name $(cliente)repext$(env) --query "[0].value" --output tsv)
+        STORAGE_CONNECTION_STRING_REPEXT="DefaultEndpointsProtocol=https;AccountName=$ACCOUNT_NAME_REPEXT;AccountKey=$ACCOUNT_KEY_REPEXT"
+        echo "##vso[task.setvariable variable=STORAGE_CONNECTION_STRING_REPEXT]$STORAGE_CONNECTION_STRING_REPEXT"
+    
+  - task: AzureCLI@2
+    displayName: 'Update of settings and cnnStrings'
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+      
+        # Obtiene el masterkey de la function App
+        functionAppHostKey=$(az functionapp keys list --resource-group $(resourceGroupName) --name plcolab-notification-$(cliente)-$(env) --query 'functionKeys.default' -o tsv)
+        #Determinar sql server a aplicar en settings
+        if [ -z "$(sqlServerNameExisting)" ]; then
+          targetSqlServerName="$(sqlServerName)"
+        else
+          targetSqlServerName="$(sqlServerNameExisting)"
+        fi
+
+        # Configurar setting "Notification.MasterKey"
+        ########## NOTIFICADOR ############
+        az functionapp config appsettings set \
+            --name plcolab-notification-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --settings $(FunctionAppMasterKey)=$functionAppHostKey
+        ########## API ############
+        az webapp config appsettings set \
+            --resource-group $(resourceGroupName) \
+            --name plcolab-api-$(cliente)-$(env) \
+            --settings $(NotificationMasterKey)=$functionAppHostKey
+        ########## VALIDATING ############
+        az webapp config appsettings set \
+            --resource-group $(resourceGroupName) \
+            --name plcolab-validating-$(cliente)-$(env) \
+            --settings $(NotificationMasterKey)=$functionAppHostKey
+        ########## ASYNC ############
+        az webapp config appsettings set \
+            --resource-group $(resourceGroupName) \
+            --name plcolab-async-$(cliente)-$(env) \
+            --settings $(NotificationMasterKey)=$functionAppHostKey
+        ########## WEBJOB NOTIFICADOR ############
+        az webapp config appsettings set \
+            --resource-group $(resourceGroupName) \
+            --name plcolab-notification-webjobs-$(cliente)-$(env) \
+            --settings $(NotificationMasterKey)=$functionAppHostKey
+        
+        # Configurar cnnstring "plcolab.2qa.database" en web app de API, webjob y function del notificaodr
+        ########## API ############
+        az webapp config connection-string set \
+            --name plcolab-api-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(NotificationSqlServer)="Data Source=$targetSqlServerName.database.windows.net;Database=plcolab-notification-$(cliente)-$(env);Persist Security Info=False;User ID=$(newSqlUsernameNotification);Password=$(newSqlPassNotication);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Connection Timeout=10;ConnectRetryCount=20;ConnectRetryInterval=5"
+        ########## WEBJOB NOTIFICADOR ############
+        az webapp config connection-string set \
+            --name plcolab-notification-webjobs-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(plcolab2qadatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=plcolab-notification-$(cliente)-$(env);Persist Security Info=False;User ID=$(newSqlUsernameNotification);Password=$(newSqlPassNotication);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Connection Timeout=10;ConnectRetryCount=20;ConnectRetryInterval=5"
+        ########## NOTIFICADOR ############
+        az webapp config connection-string set \
+            --name plcolab-notification-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(plcolab2qadatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=plcolab-notification-$(cliente)-$(env);Persist Security Info=False;User ID=$(newSqlUsernameNotification);Password=$(newSqlPassNotication);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Connection Timeout=10;ConnectRetryCount=20;ConnectRetryInterval=5"
+        
+        # Configurar cnnstring "$(cliente).eRepExt.Database" en web app de API, Async y Validating
+        ########## API ############
+        az webapp config connection-string set \
+            --name plcolab-api-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        ########## ASYNC ############
+        az webapp config connection-string set \
+            --name plcolab-async-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        ########## VALIDATING ############
+        az webapp config connection-string set \
+            --name plcolab-validating-$(cliente)-$(env) \
+            --resource-group $(resourceGroupName) \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+
+  - task: AzureCLI@2
+    displayName: 'Exportar e importar APIs para APIM'
+    condition: and(succeeded(), eq(1, 0))
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+
+        # Variables de entorno
+        RESOURCE_GROUP_REFERENCE="maestroprueba"
+        RESOURCE_GROUP_NEW=$(resourceGroupName)
+        APIM_NAME_ORIGEN="plcolab-apim-lite-dev"
+        APIM_NAME_DESTINO="plcolab-apim-$(cliente)-$(env)"
+        EXPORT_PATH="$(Build.ArtifactStagingDirectory)/apis"
+
+        # Crear directorio para almacenar las APIs exportadas
+        echo "Creando directorio de exportación: $EXPORT_PATH"
+        mkdir -p $EXPORT_PATH
+
+        # Listar APIs en el APIM de origen
+        apis=$(az apim api list --resource-group $RESOURCE_GROUP_REFERENCE --service-name $APIM_NAME_ORIGEN --query "[].{name:name, path:path}" -o tsv)
+
+        # Exportar cada API
+        echo "$apis" | while IFS=$'\t' read -r api_name api_path; do
+          echo "Exportando API: $api_name con path: $api_path"
+          az apim api export --resource-group $RESOURCE_GROUP_REFERENCE --service-name $APIM_NAME_ORIGEN --api-id $api_name --export-format OpenApiJsonFile --file-path $EXPORT_PATH/
+          if [ $? -ne 0 ]; then
+              echo "Error al exportar API: $api_name"
+              exit 1
+          fi
+        done
+
+        # Comprobación de APIs exportadas
+        echo "APIs exportadas:"
+        ls -l $EXPORT_PATH
+
+        # Importar cada API con cada path
+        echo "$apis" | while IFS=$'\t' read -r api_name api_path; do
+          if [ -z "$api_name" ] || [ -z "$api_path" ]; then
+            echo "Error: api_name o api_path está vacío. api_name='$api_name', api_path='$api_path'"
+            exit 1
+          fi
+
+          echo "Importando API: $api_name con path: $api_path"
+          az apim api import --resource-group $RESOURCE_GROUP_NEW --service-name $APIM_NAME_DESTINO --path $api_path --specification-format OpenApiJson --specification-path $EXPORT_PATH/${api_name}_openapi+json.json
+          if [ $? -ne 0 ]; then
+              echo "Error al importar API: $api_name con path: $api_path"
+              exit 1
+          fi
+        done
+
+        echo "Proceso completado."
+
+  - task: AzureCLI@2
+    displayName: 'Getting WebApp IPs'
+    inputs:
+      azureSubscription: '$(azureSubscription)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        
+        # Obtener IP de webApp API
+        OUTBOUND_IPS=$(az webapp show --name plcolab-api-$(cliente)-$(env) --resource-group $(resourceGroupName) --query "outboundIpAddresses" --output tsv)
+        OUTBOUND_IPS=${OUTBOUND_IPS//,/ }
+        echo "##vso[task.setvariable variable=OUTBOUND_IPS]$OUTBOUND_IPS"
+
+  - task: AzureCLI@2
+    displayName: 'Add inbound security rule "NSG"'
+    inputs:
+      azureSubscription: 'conexion_rg_plcolab_beta'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        
+        # variables
+        rg_NameRedis='rg_plcolab_beta'
+        
+        # Obtener el ID de la NIC asociada con la VM
+        NIC_ID=$(az vm show --resource-group $rg_NameRedis --name serverredis --query "networkProfile.networkInterfaces[0].id" --output tsv)
+        
+        # Obtener el ID de la subred
+        SUBNET_ID=$(az network nic show --ids $NIC_ID --query "ipConfigurations[0].subnet.id" --output tsv)
+        
+        # Obtener el ID del NSG asociado a la subred
+        NSG_ID=$(az network vnet subnet show --ids $SUBNET_ID --query "networkSecurityGroup.id" --output tsv)
+        
+        # Creacion de regla
+        NSG_NAME=$(basename $NSG_ID)
+        
+        # Obtener el listado de reglas y extraer las prioridades
+        PRIORITIES=$(az network nsg rule list --resource-group $rg_NameRedis --nsg-name $NSG_NAME --query "[].priority" --output tsv | sort -n)
+        
+        # Obtener la mayor prioridad
+        MAX_PRIORITY=$(echo "$PRIORITIES" | tail -n 1)
+        
+        # Calcular la nueva prioridad
+        NEW_PRIORITY=$((MAX_PRIORITY + 1))
+
+        az network nsg rule create \
+            --resource-group $rg_NameRedis \
+            --nsg-name $NSG_NAME \
+            --name plcolab-api-$(cliente)-$(env) \
+            --priority $NEW_PRIORITY \
+            --direction Inbound \
+            --access Allow \
+            --protocol "*" \
+            --source-address-prefixes $OUTBOUND_IPS \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 6379
+  
+  - task: AzureCLI@2
+    displayName: 'Add setting and cnnstring MultiProject'
+    condition: and(succeeded(), eq(1, 0))
+    inputs:
+      azureSubscription: '$(azureSubscriptionQA)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        
+        #variables
+        RG_Name_1='RG_Billforce_QA'
+        RG_Name_2='RG_Plcolab_QA'
+        RG_Name_3='RG_Compartido_QA'
+        RG_Name_4='rg_portaldeterceros_qa'
+        webAppName_billforce='facture-billforce-sync-event-tv-functions-qa'
+        webAppName_plcolabApi='plcolab-api-2qa'
+        webAppName_plcolabemision='plcolab-api-emision-2qa'
+        webAppName_plcolabWebjobs='plcolab-webjobs-2qa'
+        webAppName_foneUX='fone-ux-api-qa'
+        webAppName_teceroPagos='portaltercero-pagosmasivos-qa'
+
+        if [ -z "$(sqlServerNameExisting)" ]; then
+          targetSqlServerName="$(sqlServerName)"
+        else
+          targetSqlServerName="$(sqlServerNameExisting)"
+        fi
+
+        # Setting en BILLFORCE
+        ########## facture-billforce-sync-event-tv-functions-qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_billforce \
+            --resource-group $RG_Name_1 \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name $webAppName_billforce \
+            --resource-group $RG_Name_1 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        # Setting en PLCOLAB
+        ########## PLColab-api-2qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_plcolabApi \
+            --resource-group $RG_Name_2 \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name $webAppName_plcolabApi \
+            --resource-group $RG_Name_2 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+
+        ########## PLColab-api-emision-2qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_plcolabemision \
+            --resource-group $RG_Name_2 \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name $webAppName_plcolabemision \
+            --resource-group $RG_Name_2 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ########## plcolab-webjobs-2qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_plcolabWebjobs \
+            --resource-group $RG_Name_2 \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name $webAppName_plcolabWebjobs \
+            --resource-group $RG_Name_2 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+           
+        # Setting en FactureOne
+        ########## fone-ux-api-qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_foneUX \
+            --resource-group $RG_Name_3 \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name $webAppName_foneUX \
+            --resource-group $RG_Name_3 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        # Setting en portaltercero
+        ########## portaltercero-pagosmasivos-qa ##########
+        az webapp config connection-string set \
+            --name $webAppName_teceroPagos \
+            --resource-group $RG_Name_4 \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        # Setting en reception
+        ########## fone-reception-sistemaexternos-qa ##########
+        az webapp config connection-string set \
+            --name fone-reception-sistemaexternos-qa \
+            --resource-group rg_sistemasexternos_qa \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ########## reception-domain-service-qa ##########
+        az webapp config connection-string set \
+            --name reception-domain-service-qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name reception-domain-service-qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ########## reception-webjobs-2qa ##########
+        az webapp config connection-string set \
+            --name reception-webjobs-2qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type Custom \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        az webapp config connection-string set \
+            --name reception-webjobs-2qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ######### fone-reception-documents-pending-qa ##########
+        az webapp config connection-string set \
+            --name fone-reception-documents-pending-qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ######### fone-reception-documents-qa ##########
+        az webapp config appsettings set \
+            --resource-group RG_Recepcion_QA \
+            --name fone-reception-documents-qa \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+
+        az webapp config appsettings set \
+            --resource-group RG_Recepcion_QA \
+            --name fone-reception-documents-qa \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+        
+        ######### fone-reception-documents-unlocked-qa ##########
+        az webapp config connection-string set \
+            --name fone-reception-documents-unlocked-qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ######### fone-reception-timers-qa ##########
+        az webapp config connection-string set \
+            --name fone-reception-timers-qa \
+            --resource-group RG_Recepcion_QA \
+            --connection-string-type SQLAzure \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+        
+        ######### fone-reception-documents-async-qa ##########
+        az webapp config appsettings set \
+            --resource-group RG_Recepcion_QA \
+            --name fone-reception-documents-async-qa \
+            --settings $(clienteeRepExtDatabase)="Data Source=$targetSqlServerName.database.windows.net;Database=$(cliente)-repext-$(env);Persist Security Info=False;User ID=$(newSqlUsernameRepext);Password=$(newSqlPasswordRepext); Connection Timeout=10; ConnectRetryCount=20; ConnectRetryInterval=5"
+
+        az webapp config appsettings set \
+            --resource-group RG_Recepcion_QA \
+            --name fone-reception-documents-async-qa \
+            --settings $(clienteRepExtStorage)=$STORAGE_CONNECTION_STRING_REPEXT
+

@@ -368,7 +368,7 @@ jobs:
             --name plcolab-api-$(cliente)-$(env) \
             --resource-group $(resourceGroupName) \
             --connection-string-type SQLAzure \
-            --settings $(NotificationSqlServer)="Data Source=$targetSqlServerName.database.windows.net;Database=plcolab-notification-$(cliente)-$(env);Persist Security Info=False;User ID=$(newSqlUsernameNotification);Password=$(newSqlPassNotication);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Connection Timeout=10;ConnectRetryCount=20;ConnectRetryInterval=5"
+            --settings $(NotificationSqlServer)=""
         ########## WEBJOB NOTIFICADOR ############
         az webapp config connection-string set \
             --name plcolab-notification-webjobs-$(cliente)-$(env) \
